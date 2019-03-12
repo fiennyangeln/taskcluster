@@ -106,67 +106,95 @@ tasks:
             CHROME_BIN=firefox DISPLAY=:99 yarn test
     in:
       $let:
-        js:
-          $map:
-            $flatten:
-              # for "packages", run tests for that package
-              - $map: {$eval: packages}
-                each(package):
-                  name: ${package}
-                  image: node:${node}
-                  command: yarn workspace ${package} test
-              # for "others", do whatever they say to do
-              - $map: {$eval: others}
-                each(other):
-                  name: ${other.name}
-                  image:  # use `image` if given, falling back to the node image
-                    $if: other['image']
-                    then: ${other.image}
-                    else: "node:${node}"
-                  command: ${other.command}
-          each(job):
-            taskId: {$eval: as_slugid(job.name)}
-            provisionerId: aws-provisioner-v1
-            workerType: github-worker
-            created: {$fromNow: ''}
-            deadline: {$fromNow: '20 minutes'}
-            scopes:
-              - assume:project:taskcluster:tests:taskcluster
-              - docker-worker:cache:project-taskcluster-test-yarn-cache
-            payload:
-              features:
-                taskclusterProxy: true
-              env:
-                DEBUG: ${debug}
-                NO_TEST_SKIP:
-                  $if: 'job.name != "taskcluster-lib-testing"'
-                  then: true
-                TEST_BUCKET: 'test-bucket-for-any-garbage' # TODO: Allow each project to specify its own env
-                YARN_CACHE_FOLDER: /yarn-cache
-              maxRunTime: 1200
-              cache:
-                  project-taskcluster-test-yarn-cache: /yarn-cache
-              image: ${job.image}
-              command:
-                - "/bin/bash"
-                - "-lc"
-                - >-
-                  git clone --quiet --depth=1 --no-single-branch ${repo.git_url} taskcluster &&
-                  cd taskcluster &&
-                  git checkout ${repo.ref} &&
-                  yarn --frozen-lockfile &&
-                  ${job.command}
-            metadata:
-              name: ${job.name}
-              description: ${job.name}
-              owner: ${owner}
-              source: ${repo.url}
+        jobs:
+          $flatten:
+            # for "packages", run tests for that package
+            - $map: {$eval: packages}
+              each(package):
+                name: ${package}
+                image: node:${node}
+                command: yarn workspace ${package} test
+            # for "others", do whatever they say to do
+            - $map: {$eval: others}
+              each(other):
+                name: ${other.name}
+                image:  # use `image` if given, falling back to the node image
+                  $if: other['image']
+                  then: ${other.image}
+                  else: "node:${node}"
+                command: ${other.command}
       in:
-        $flattenDeep:
-        - $if: 'tasks_for == "github-push"'
-          then: {$eval: js}
-        - $if: 'tasks_for == "github-pull-request" && event["action"] in ["opened", "reopened", "synchronize"]'
-          then:
-            # We can skip this if pushed to our own repo since push event will get it
-            $if: 'event.pull_request.base.repo.id != event.pull_request.head.repo.id'
+        $let:
+          js:
+            $flatten:
+              - taskId: {$eval: as_slugid('trailer')}
+                provisionerId: aws-provisioner-v1
+                workerType: github-worker
+                created: {$fromNow: ''}
+                deadline: {$fromNow: '30 minutes'} # Allow some extra time past the end of the other tasks
+                requires: 'all-resolved'
+                dependencies:
+                  $map: {$eval: jobs}
+                  each(job):
+                    {$eval: as_slugid(job.name)}
+                payload:
+                  image: node:${node}
+                  maxRunTime: 60
+                  command:
+                    - "/bin/bash"
+                    - "-lc"
+                    - "echo hi"
+                metadata:
+                  name: trailer
+                  description: handle last steps of tasks
+                  owner: ${owner}
+                  source: ${repo.url}
+
+
+              - $map: {$eval: jobs}
+                each(job):
+                  taskId: {$eval: as_slugid(job.name)}
+                  provisionerId: aws-provisioner-v1
+                  workerType: github-worker
+                  created: {$fromNow: ''}
+                  deadline: {$fromNow: '20 minutes'}
+                  scopes:
+                    - assume:project:taskcluster:tests:taskcluster
+                    - docker-worker:cache:project-taskcluster-test-yarn-cache
+                  payload:
+                    features:
+                      taskclusterProxy: true
+                    env:
+                      DEBUG: ${debug}
+                      NO_TEST_SKIP:
+                        $if: 'job.name != "taskcluster-lib-testing"'
+                        then: true
+                      TEST_BUCKET: 'test-bucket-for-any-garbage' # TODO: Allow each project to specify its own env
+                      YARN_CACHE_FOLDER: /yarn-cache
+                    maxRunTime: 1200
+                    cache:
+                        project-taskcluster-test-yarn-cache: /yarn-cache
+                    image: ${job.image}
+                    command:
+                      - "/bin/bash"
+                      - "-lc"
+                      - >-
+                        git clone --quiet --depth=1 --no-single-branch ${repo.git_url} taskcluster &&
+                        cd taskcluster &&
+                        git checkout ${repo.ref} &&
+                        yarn --frozen-lockfile &&
+                        ${job.command}
+                  metadata:
+                    name: ${job.name}
+                    description: ${job.name}
+                    owner: ${owner}
+                    source: ${repo.url}
+        in:
+          $flattenDeep:
+          - $if: 'tasks_for == "github-push"'
             then: {$eval: js}
+          - $if: 'tasks_for == "github-pull-request" && event["action"] in ["opened", "reopened", "synchronize"]'
+            then:
+              # We can skip this if pushed to our own repo since push event will get it
+              $if: 'event.pull_request.base.repo.id != event.pull_request.head.repo.id'
+              then: {$eval: js}
